@@ -1028,7 +1028,8 @@ static int32_t FindEntry(const ZipArchive* archive, std::string_view entryName,
     return kInvalidOffset;
   }
 
-  if (data->method == kCompressStored && data->uncompressed_length > cd_offset - data_offset) {
+  // GhostMap: Readers such as libandroidfw map every non-deflated entry at its uncompressed size
+  if (data->method != kCompressDeflated && data->uncompressed_length > cd_offset - data_offset) {
     ALOGW("Zip: bad uncompressed length in zip (%" PRId64 " + %" PRIu64 " > %" PRId64 ")",
           static_cast<int64_t>(data_offset), data->uncompressed_length,
           static_cast<int64_t>(cd_offset));

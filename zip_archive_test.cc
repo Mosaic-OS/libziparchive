@@ -1442,3 +1442,73 @@ TEST(ziparchive, ExtractHugeFileOn32Bit) {
   ASSERT_NE(-1, tmp.fd);
   ASSERT_EQ(0, ExtractEntryToFile(handle, &entry, tmp.fd));
 }
+
+// One entry "a.txt" storing the 4 bytes "foo\n" under |method| while declaring |uncompressed_size|.
+static std::vector<uint8_t> MakeSingleEntryZip(uint16_t method, uint32_t uncompressed_size) {
+  static constexpr std::string_view kName = "a.txt";
+  static constexpr std::string_view kData = "foo\n";
+  static constexpr uint32_t kCrc = 0x7e3265a8;
+  std::vector<uint8_t> zip;
+  auto append = [&zip](const void* data, size_t size) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    zip.insert(zip.end(), bytes, bytes + size);
+  };
+
+  LocalFileHeader lfh = {};
+  lfh.lfh_signature = LocalFileHeader::kSignature;
+  lfh.compression_method = method;
+  lfh.crc32 = kCrc;
+  lfh.compressed_size = static_cast<uint32_t>(kData.size());
+  lfh.uncompressed_size = uncompressed_size;
+  lfh.file_name_length = static_cast<uint16_t>(kName.size());
+  append(&lfh, sizeof(lfh));
+  append(kName.data(), kName.size());
+  append(kData.data(), kData.size());
+
+  const auto cd_offset = static_cast<uint32_t>(zip.size());
+  CentralDirectoryRecord cdr = {};
+  cdr.record_signature = CentralDirectoryRecord::kSignature;
+  cdr.compression_method = method;
+  cdr.crc32 = kCrc;
+  cdr.compressed_size = static_cast<uint32_t>(kData.size());
+  cdr.uncompressed_size = uncompressed_size;
+  cdr.file_name_length = static_cast<uint16_t>(kName.size());
+  append(&cdr, sizeof(cdr));
+  append(kName.data(), kName.size());
+
+  EocdRecord eocd = {};
+  eocd.eocd_signature = EocdRecord::kSignature;
+  eocd.num_records_on_disk = 1;
+  eocd.num_records = 1;
+  eocd.cd_size = static_cast<uint32_t>(zip.size()) - cd_offset;
+  eocd.cd_start_offset = cd_offset;
+  append(&eocd, sizeof(eocd));
+  return zip;
+}
+
+// GhostMap: a non-deflated entry must not declare more data than lies before the central directory.
+TEST(ziparchive, NonDeflatedUncompressedLengthBounded) {
+  for (const uint16_t method : std::vector<uint16_t>{kCompressStored, 99, 0xffff}) {
+    SCOPED_TRACE(method);
+    std::vector<uint8_t> zip = MakeSingleEntryZip(method, 16 * 1024 * 1024);
+    ZipArchiveHandle handle;
+    ASSERT_EQ(0, OpenArchiveFromMemory(zip.data(), zip.size(), "ghostmap", &handle));
+    ZipEntry64 entry;
+    ASSERT_EQ(kInvalidOffset, FindEntry(handle, "a.txt", &entry));
+    CloseArchive(handle);
+
+    zip = MakeSingleEntryZip(method, 4);
+    ASSERT_EQ(0, OpenArchiveFromMemory(zip.data(), zip.size(), "ghostmap", &handle));
+    ASSERT_EQ(0, FindEntry(handle, "a.txt", &entry));
+    ASSERT_EQ(method, entry.method);
+    CloseArchive(handle);
+  }
+
+  // Deflated data legitimately expands, so its uncompressed size stays unbounded.
+  std::vector<uint8_t> zip = MakeSingleEntryZip(kCompressDeflated, 16 * 1024 * 1024);
+  ZipArchiveHandle handle;
+  ASSERT_EQ(0, OpenArchiveFromMemory(zip.data(), zip.size(), "ghostmap", &handle));
+  ZipEntry64 entry;
+  ASSERT_EQ(0, FindEntry(handle, "a.txt", &entry));
+  CloseArchive(handle);
+}
